@@ -1,0 +1,75 @@
+name: Sync IPTV Focus Taiwan/HK/News
+
+on:
+  schedule:
+    - cron: '0 */2 * * *'   # 每2小时执行一次，平衡时效与API限额
+  workflow_dispatch:      # 允许手动触发
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout your repo
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Prepare directory
+        run: mkdir -p playlists
+
+      - name: Fetch and Download from Source Repo
+        run: |
+          # 获取原始仓库列表并下载到 playlists 目录
+          curl -s https://api.github.com/repos/abusaeeidx/IPTV-Scraper-Zilla/contents \
+          | jq -r '.[] | select(.name | test("\\.(m3u8?)$")) | .download_url' > urls.txt
+          
+          while read -r url; do
+            [ -z "$url" ] && continue
+            filename=$(basename "$url")
+            curl -L -o "playlists/$filename" "$url"
+          done < urls.txt
+
+      - name: Download Specific Sources
+        run: |
+          # 下载体育源
+          curl -L -o "playlists/Nowsports.m3u" "https://raw.githubusercontent.com/ediart/tvbox/refs/heads/main/TVBoxOSC/tvbox/sports.m3u"
+          # 下载全球源
+          curl -L -o "playlists/world.m3u" "https://iptv-org.github.io/iptv/index.m3u"
+
+      - name: Create Custom Focus List (Taiwan/HK/News/QiYu)
+        run: |
+          # 创建精选频道列表
+          echo "#EXTM3U" > playlists/custom_focus.m3u
+          
+          # 筛选逻辑：从所有下载的文件中提取包含关键词的行及其下一行（流媒体地址）
+          # 关键词：台湾, 台灣, 香港, 泰国, 泰國, 新闻, 新聞, 齐豫, 齊豫
+          grep -hEi "台湾|台灣|香港|泰国|泰國|新闻|新聞|齐豫|齊豫" playlists/*.m3u -A 1 --no-group-separator | grep -v "http" | sed 's/^/#EXTINF:-1, /' > temp_names.txt
+          grep -hEi "台湾|台灣|香港|泰国|泰國|新闻|新聞|齐豫|齊豫" playlists/*.m3u -A 1 --no-group-separator | grep "http" > temp_urls.txt
+          
+          # 合并名称和URL
+          paste -d "\n" temp_names.txt temp_urls.txt >> playlists/custom_focus.m3u
+          
+          # 清理临时文件
+          rm temp_names.txt temp_urls.txt
+
+      - name: Commit and Push if changed
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add playlists/*.m3u playlists/*.m3u8
+          
+          if git diff --cached --quiet; then
+            echo "No changes."
+            exit 0
+          fi
+
+          git commit -m "Update IPTV: Added Focus List (TW/HK/News)"
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin HEAD:${GITHUB_REF#refs/heads/}
